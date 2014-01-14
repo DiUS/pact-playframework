@@ -2,57 +2,69 @@ package com.dius.pact.play
 
 import com.dius.pact.runner.PactFileSource
 import org.specs2.mutable.Specification
-import scala.concurrent.Await
+import scala.concurrent.{Promise, Future, Await}
 import scala.concurrent.duration._
 
-import org.specs2.specification.{FormattingFragments => FF}
-import play.api.libs.ws.WS
-import play.api.test.Helpers._
-import com.dius.pact.model.Pact
-import com.dius.pact.model.Request
+import org.specs2.specification.{FormattingFragments => FF, Step, Fragments}
+import com.dius.pact.model.{ResponseMatching, Response, Request}
 import play.api.test.WithServer
-import play.api.Play.current
-import play.api.libs.json.Json
+import java.io.File
+import com.dius.pact.model.Matching.MatchFound
+import akka.actor.ActorSystem
+import spray.http._
+import spray.http.HttpRequest
+import com.dius.pact.runner.PactConfiguration
+import spray.http.HttpHeaders.RawHeader
+import spray.http.HttpResponse
+import play.api.test.FakeApplication
+import com.dius.pact.model.spray.Conversions
 
 trait PactPlaySpecification extends Specification {
 
+  def pactRoot: File
+  def pactConfig: PactConfiguration
+  def startAppInState(state: String): FakeApplication
 
-  //val testJson = s"src/test/resources/pacts"
+  private val aSys = Promise[ActorSystem]()
 
-  def testJson(): String
-
-  def loadPacts(dir:String):Seq[Pact] = PactFileSource.loadFiles(dir)
-
-
-  //TODO: can use spray client to replace play WS
-  def fullUrl(path: String) = WS.url("http://localhost:19001" + path)
-  def fullUrlJson(path: String) = fullUrl(path).withHeaders(CONTENT_TYPE -> "application/json")
-
-  def chooseRequest(path: String,input: String, method: String) = method.toLowerCase() match {
-    case "get" => fullUrl(path).get()
-    case "post" => fullUrlJson(path).post(input)
-    case "put" => fullUrlJson(path).put(input)
+  private def startActorSystem = {
+    aSys.success(ActorSystem("Pact-Provider-Verification-Actor-System"))
   }
 
-  private val pacts: Seq[Pact] = loadPacts(testJson)
+  private def stopActorSystem = {
+    aSys.future.map(_.shutdown())
+  }
 
-  pacts.map { j =>
-    addFragments(FF.p)
-    addFragments(j.provider.name + " should")
-    j.interactions.map{ i =>
-      i.description >>  new WithServer {
-        val result = {
-          val request: Request = i.request
-          Await.result(chooseRequest(request.path,request.body.getOrElse(""),request.method.toString()), Duration(3, SECONDS))
-        }
-        result.status === i.response.status
-
-        i.response.body.map(b => Json.parse(result.body) === Json.parse(b)).getOrElse(1 === 1)
-
+  private def invoke(baseUrl: String, request: Request): Future[Response] = {
+    aSys.future.flatMap{ actorSystem =>
+      implicit val system = actorSystem
+      implicit val executionContext = system.dispatcher
+      val pipeline: HttpRequest => Future[HttpResponse] = _root_.spray.client.pipelining.sendReceive
+      val method = HttpMethods.getForKey(request.method.toString.toUpperCase).get
+      val uri = Uri(s"$baseUrl${request.path}")
+      val headers: List[HttpHeader] = request.headers.map(_.toList.map{case (key, value) => RawHeader(key, value)}).getOrElse(Nil)
+      val entity: HttpEntity = request.bodyString.map(HttpEntity(_)).getOrElse(HttpEntity.Empty)
+      println(s"invoking service with: $request")
+      pipeline(HttpRequest(method, uri, headers, entity)).map{ sprayResponse =>
+        Conversions.sprayToPactResponse(sprayResponse)
       }
     }
   }
 
+  PactFileSource.loadFiles(pactRoot).map { pact =>
+    addFragments(FF.p)
+    addFragments(pact.provider.name + " should")
+    pact.interactions.map{ interaction =>
+      interaction.description >>  new WithServer(startAppInState(interaction.providerState)) {
+        val actualResponse = {
+          val request: Request = interaction.request
+          Await.result(invoke(s"http://localhost:$port", request), Duration(3, SECONDS))
+        }
+        ResponseMatching.matchRules(interaction.response, actualResponse) must beEqualTo(MatchFound)
+      }
+    }
+  }
 
+  override def map(fs: =>Fragments) =  Step(startActorSystem) ^ fs ^ Step(stopActorSystem)
 }
 

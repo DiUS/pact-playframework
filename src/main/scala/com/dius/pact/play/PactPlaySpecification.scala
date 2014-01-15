@@ -25,6 +25,8 @@ trait PactPlaySpecification extends Specification {
   def pactConfig: PactConfiguration
   def startAppInState(state: String): FakeApplication
 
+  lazy val playExecutionContext = play.api.libs.concurrent.Execution.Implicits.defaultContext
+
   private val aSys = Promise[ActorSystem]()
 
   private def startActorSystem = {
@@ -32,7 +34,7 @@ trait PactPlaySpecification extends Specification {
   }
 
   private def stopActorSystem = {
-    aSys.future.map(_.shutdown())
+    aSys.future.map(_.shutdown())(playExecutionContext)
   }
 
   private def invoke(baseUrl: String, request: Request): Future[Response] = {
@@ -47,14 +49,14 @@ trait PactPlaySpecification extends Specification {
       println(s"invoking service with: $request")
       pipeline(HttpRequest(method, uri, headers, entity)).map{ sprayResponse =>
         Conversions.sprayToPactResponse(sprayResponse)
-      }
-    }
+      }(playExecutionContext)
+    }(playExecutionContext)
   }
 
   PactFileSource.loadFiles(pactRoot).map { pact =>
     addFragments(FF.p)
     addFragments(pact.provider.name + " should")
-    pact.interactions.map{ interaction =>
+    pact.interactions.map { interaction =>
       interaction.description >>  new WithServer(startAppInState(interaction.providerState)) {
         val actualResponse = {
           val request: Request = interaction.request

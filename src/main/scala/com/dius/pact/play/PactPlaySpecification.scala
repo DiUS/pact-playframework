@@ -45,7 +45,7 @@ trait PactPlaySpecification extends Specification {
       val method = HttpMethods.getForKey(request.method.toString.toUpperCase).get
       val uri = Uri(s"$baseUrl${request.path}")
       val headers: List[HttpHeader] = request.headers.map(_.toList.map{case (key, value) => RawHeader(key, value)}).getOrElse(Nil)
-      val entity: HttpEntity = request.bodyString.map(HttpEntity(_)).getOrElse(HttpEntity.Empty)
+      val entity: HttpEntity = request.bodyString.map(HttpEntity(ContentTypes.`application/json`, _)).getOrElse(HttpEntity.Empty)
       pipeline(HttpRequest(method, uri, headers, entity)).map{ sprayResponse =>
         Conversions.sprayToPactResponse(sprayResponse)
       }(playExecutionContext)
